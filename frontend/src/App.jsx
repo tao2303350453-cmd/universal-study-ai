@@ -7,7 +7,7 @@ import LoadingAnimation from './components/LoadingAnimation'
 
 // In dev, Vite proxy handles /api -> localhost:8000
 // In prod, set this to your backend URL
-const API_BASE = ''
+const API_BASE = 'https://universal-study-ai-myb8.vercel.app'
 
 export default function App() {
   // ── Config state ──
