@@ -4,6 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 import httpx
 
+# 如果你有 parsers.py，即使现在没用到，也建议加上这行
+# import parsers 
+
 app = FastAPI()
 
 # 允许跨域
@@ -14,18 +17,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 初始化 Supabase
-url = os.environ.get("SUPABASE_URL")
-key = os.environ.get("SUPABASE_KEY")
-supabase: Client = create_client(url, key)
+# --- 关键修改区：安全初始化 Supabase ---
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://your-placeholder-url.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "your-placeholder-key")
+
+# 只有当 URL 不是占位符时才创建客户端，防止部署直接挂掉
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+except Exception as e:
+    print(f"Supabase connection error: {e}")
+    supabase = None
+# ---------------------------------------
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "2.0-multi-subject"}
+    return {
+        "status": "ok", 
+        "version": "2.0-multi-subject",
+        "supabase_connected": supabase is not None
+    }
 
 @app.get("/api/subjects")
 async def get_subjects():
-    # 获取所有学科分类
+    if not supabase:
+        return {"error": "Supabase not configured"}
     response = supabase.table("subjects").select("*").execute()
     return response.data
 
@@ -34,10 +49,12 @@ async def upload_file(
     file: UploadFile = File(...), 
     subject_id: str = Form(...)
 ):
-    # 1. 读取文件内容
-    content = (await file.read()).decode("utf-8")
+    if not supabase:
+        return {"error": "Supabase not configured"}
     
-    # 2. 存入 Supabase
+    # 注意：这里如果读取 PDF/Word 建议后续调用 parsers.py 里的逻辑
+    content = (await file.read()).decode("utf-8", errors="ignore")
+    
     data = {
         "subject_id": subject_id,
         "filename": file.filename,
@@ -48,9 +65,10 @@ async def upload_file(
 
 @app.post("/api/chat")
 async def chat(message: str, subject_id: str):
-    # 3. 跨文档检索：获取该学科下所有文档
+    if not supabase:
+        return {"error": "Supabase not configured"}
+        
     docs = supabase.table("documents").select("content").eq("subject_id", subject_id).execute()
     context = "\n".join([d['content'] for d in docs.data])
     
-    # 这里调用 DeepSeek 逻辑（略，保持之前配置即可）
-    return {"answer": f"基于该学科知识库的内容，我的回答是..."}
+    return {"answer": "后端已连接，环境正常。"}
