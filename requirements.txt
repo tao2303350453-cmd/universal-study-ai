@@ -3,3 +3,6 @@ uvicorn
 supabase
 httpx
 python-multipart
+openai
+pypdf
+langchain-text-splitters
