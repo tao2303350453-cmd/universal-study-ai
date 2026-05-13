@@ -1,123 +1,785 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <title>AI 学科助手 Pro</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI 学科助手</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Font Awesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
 </head>
-<body class="bg-slate-50 h-screen flex overflow-hidden">
-    <aside class="w-72 bg-slate-900 text-white flex flex-col shadow-2xl">
-        <div class="p-6 border-b border-slate-800 font-bold text-xl flex items-center gap-2">
-            <i class="fas fa-graduation-cap text-blue-400"></i> 我的学科中心
-        </div>
-        <nav id="categoryTree" class="flex-1 overflow-y-auto p-4 space-y-2"></nav>
-        <div class="p-4">
-            <button onclick="addCategory()" class="w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold transition">
-                + 添加新学科
-            </button>
-        </div>
+<body class="bg-slate-50">
+
+  <div class="flex h-screen overflow-hidden" id="app">
+    <!-- ========== 左侧边栏 ========== -->
+    <aside class="w-64 bg-slate-900 flex flex-col shrink-0" id="sidebar">
+      <!-- 标题 -->
+      <div class="p-4 border-b border-slate-700">
+        <h1 class="text-white font-bold text-lg flex items-center gap-2">
+          <i class="fas fa-brain text-blue-400"></i>
+          AI 学科助手
+        </h1>
+        <p class="text-slate-400 text-xs mt-1">智能学习管理系统</p>
+      </div>
+
+      <!-- 新建学科按钮 -->
+      <div class="p-3 border-b border-slate-700">
+        <button
+          class="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg px-3 py-2 transition-colors"
+          onclick="openCreateModal(null)"
+        >
+          <i class="fas fa-plus"></i>
+          新建学科
+        </button>
+      </div>
+
+      <!-- 分类树 -->
+      <div class="flex-1 overflow-y-auto py-2" id="categoryTree">
+        <p class="text-slate-500 text-xs text-center py-8">加载中...</p>
+      </div>
     </aside>
 
-    <main class="flex-1 flex flex-col bg-white">
-        <header class="h-16 border-b flex items-center justify-between px-8 bg-slate-50/50">
-            <div id="statusText" class="font-bold text-slate-700 underline decoration-blue-500">请先在左侧选择学科...</div>
-            <div id="uploadBox" class="hidden">
-                <input type="file" id="fileIn" class="hidden" onchange="upload(this)">
-                <button onclick="document.getElementById('fileIn').click()" class="bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm font-bold">
-                    上传资料
-                </button>
-            </div>
-        </header>
-        <div id="chatArea" class="flex-1 overflow-y-auto p-6 space-y-4"></div>
-        <div class="p-4 border-t flex gap-2">
-            <input type="text" id="userInput" class="flex-1 border rounded-xl px-4 py-2" placeholder="选中具体学科后即可提问...">
-            <button onclick="send()" class="bg-blue-600 text-white px-8 py-2 rounded-xl font-bold">发送</button>
+    <!-- ========== 右侧主区域 ========== -->
+    <main class="flex-1 flex flex-col overflow-hidden" id="mainContent">
+      <!-- 面包屑导航 -->
+      <div class="bg-white border-b border-slate-200 px-6 py-3" id="breadcrumb">
+        <p class="text-sm text-slate-400">
+          <i class="fas fa-arrow-left mr-2"></i>
+          请从左侧选择一个学科
+        </p>
+      </div>
+
+      <!-- 内容区 -->
+      <div class="flex-1 overflow-y-auto p-6" id="contentArea">
+        <!-- 默认占位 -->
+        <div class="flex items-center justify-center h-full text-slate-400" id="placeholder">
+          <div class="text-center">
+            <i class="fas fa-folder-open text-5xl mb-4 text-slate-300"></i>
+            <p class="text-lg">请从左侧选择一个学科</p>
+            <p class="text-sm mt-2">选择后可查看资料、上传文件或提问</p>
+          </div>
         </div>
+
+        <!-- 详情区域（选中分类后显示） -->
+        <div class="max-w-4xl mx-auto space-y-6 hidden" id="detailArea">
+          <!-- 综合测试按钮 -->
+          <div class="flex items-center gap-3" id="examSection">
+            <button
+              class="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+              onclick="generateExam()"
+              id="examBtn"
+            >
+              <i class="fas fa-file-alt"></i>
+              综合测试
+            </button>
+          </div>
+
+          <!-- 试卷显示 -->
+          <div class="bg-white rounded-lg border border-slate-200 hidden" id="examArea">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+              <h3 class="font-semibold text-lg text-slate-800">
+                <i class="fas fa-file-alt text-blue-600 mr-2"></i>
+                <span id="examTitle">综合测试</span>
+              </h3>
+              <button class="text-sm text-blue-600 hover:text-blue-800" onclick="closeExam()">
+                关闭 <i class="fas fa-times ml-1"></i>
+              </button>
+            </div>
+            <div class="p-4 space-y-3" id="examContent"></div>
+          </div>
+
+          <!-- 文件列表 -->
+          <div class="bg-white rounded-lg border border-slate-200">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+              <h2 class="font-semibold text-slate-700 flex items-center gap-2">
+                <i class="fas fa-paperclip text-blue-600"></i>
+                资料文件
+                <span class="text-xs text-slate-400 font-normal" id="fileCount">(0 个文件)</span>
+              </h2>
+              <label class="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 py-1.5 rounded-lg cursor-pointer transition-colors">
+                <i class="fas fa-upload"></i>
+                上传资料
+                <input type="file" class="hidden" id="fileUpload" onchange="handleUpload(event)" />
+              </label>
+            </div>
+            <div id="fileList">
+              <div class="p-8 text-center text-slate-400">
+                <i class="fas fa-file-upload text-3xl mb-2"></i>
+                <p class="text-sm">暂无资料，点击上方按钮上传</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 聊天区域 -->
+          <div class="bg-white rounded-lg border border-slate-200">
+            <div class="px-4 py-3 border-b border-slate-100">
+              <h2 class="font-semibold text-slate-700 flex items-center gap-2">
+                <i class="fas fa-comments text-blue-600"></i>
+                智能问答
+              </h2>
+            </div>
+            <div class="h-64 overflow-y-auto p-4 space-y-3" id="chatMessages">
+              <div class="flex items-center justify-center h-full text-slate-400">
+                <p class="text-sm">输入问题，AI 将基于当前学科的资料回答</p>
+              </div>
+            </div>
+            <div class="border-t border-slate-100 p-3">
+              <div class="flex gap-2">
+                <input
+                  class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="输入你的问题..."
+                  id="chatInput"
+                  onkeydown="handleChatKey(event)"
+                />
+                <button
+                  class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+                  onclick="handleChat()"
+                  id="chatBtn"
+                >
+                  <i class="fas fa-paper-plane"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </main>
+  </div>
 
-    <script>
-        let curId = null;
-        let allData = [];
+  <!-- ========== 模态框 ========== -->
+  <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 hidden" id="modalOverlay">
+    <div class="bg-white rounded-lg p-6 w-80 shadow-xl">
+      <h3 class="text-lg font-semibold mb-4" id="modalTitle">新建分类</h3>
+      <input
+        class="w-full border border-slate-300 rounded px-3 py-2 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        placeholder="输入名称"
+        id="modalInput"
+        onkeydown="if(event.key==='Enter') confirmModal()"
+      />
+      <div class="flex justify-end gap-2">
+        <button
+          class="px-4 py-2 text-sm rounded bg-slate-100 hover:bg-slate-200"
+          onclick="closeModal()"
+        >
+          取消
+        </button>
+        <button
+          class="px-4 py-2 text-sm rounded bg-blue-600 text-white hover:bg-blue-700"
+          onclick="confirmModal()"
+          id="modalConfirmBtn"
+        >
+          确认
+        </button>
+      </div>
+    </div>
+  </div>
 
-        async function refresh() {
-            const res = await fetch('/api/categories');
-            allData = await res.json();
-            const tree = document.getElementById('categoryTree');
-            tree.innerHTML = '';
-            // 先渲染一级目录
-            allData.filter(c => !c.parent_id).forEach(root => {
-                const div = document.createElement('div');
-                div.innerHTML = `
-                    <div class="p-3 hover:bg-slate-800 rounded-xl cursor-pointer font-bold ${curId === root.id ? 'bg-slate-800 text-blue-400' : ''}" 
-                         onclick="select('${root.id}', '${root.name}')">
-                        <i class="fas fa-folder mr-2"></i> ${root.name}
-                    </div>
-                    <div id="sub-${root.id}" class="ml-6 mt-1 space-y-1"></div>
-                `;
-                tree.appendChild(div);
-                // 渲染子目录
-                allData.filter(c => c.parent_id === root.id).forEach(sub => {
-                    const subDiv = document.createElement('div');
-                    subDiv.className = `p-2 text-sm hover:text-white cursor-pointer ${curId === sub.id ? 'text-blue-400' : 'text-slate-400'}`;
-                    subDiv.innerHTML = `<i class="fas fa-file-alt mr-2"></i> ${sub.name}`;
-                    subDiv.onclick = (e) => { e.stopPropagation(); select(sub.id, sub.name); };
-                    div.querySelector(`#sub-${root.id}`).appendChild(subDiv);
-                });
+  <!-- ========== 删除确认模态框 ========== -->
+  <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 hidden" id="deleteModalOverlay">
+    <div class="bg-white rounded-lg p-6 w-80 shadow-xl">
+      <h3 class="text-lg font-semibold mb-4">确认删除</h3>
+      <p class="text-sm text-slate-600 mb-4" id="deleteModalText">确定删除此分类及其所有子分类吗？</p>
+      <div class="flex justify-end gap-2">
+        <button class="px-4 py-2 text-sm rounded bg-slate-100 hover:bg-slate-200" onclick="closeDeleteModal()">取消</button>
+        <button class="px-4 py-2 text-sm rounded bg-red-600 text-white hover:bg-red-700" id="deleteConfirmBtn">删除</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ============================================================
+    // 全局状态
+    // ============================================================
+    const API_BASE = '/api';
+    let categories = [];          // flat list
+    let tree = [];                // nested tree
+    let selectedId = null;        // 当前选中分类 id
+    let expandedIds = new Set();  // 展开的节点 id
+    let documents = [];           // 当前分类的文件
+    let messages = [];            // 聊天消息
+    let loading = false;          // 聊天加载状态
+
+    // 模态框状态
+    let modalType = null;         // 'create' | 'rename' | 'delete'
+    let modalParentId = null;
+    let modalNodeId = null;
+    let modalNodeName = '';
+
+    // ============================================================
+    // 工具函数
+    // ============================================================
+    async function apiFetch(path, options = {}) {
+      const url = API_BASE + path;
+      const res = await fetch(url, {
+        headers: { 'Content-Type': 'application/json', ...options.headers },
+        ...options,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '未知错误');
+        throw new Error('API ' + res.status + ': ' + text);
+      }
+      const ct = res.headers.get('content-type') || '';
+      if (ct.includes('application/json')) return res.json();
+      return res.text();
+    }
+
+    function buildTree(flat) {
+      const map = {};
+      const roots = [];
+      flat.forEach(c => { map[c.id] = { ...c, children: [] }; });
+      flat.forEach(c => {
+        const node = map[c.id];
+        if (c.parent_id && map[c.parent_id]) {
+          map[c.parent_id].children.push(node);
+        } else {
+          roots.push(node);
+        }
+      });
+      return roots;
+    }
+
+    function findPath(tree, targetId, ancestors = []) {
+      for (const node of tree) {
+        if (node.id === targetId) return [...ancestors, node];
+        const found = findPath(node.children, targetId, [...ancestors, node]);
+        if (found) return found;
+      }
+      return null;
+    }
+
+    function findNode(tree, targetId) {
+      for (const node of tree) {
+        if (node.id === targetId) return node;
+        const found = findNode(node.children, targetId);
+        if (found) return found;
+      }
+      return null;
+    }
+
+    function isTopLevel(tree, id) {
+      return tree.some(n => n.id === id);
+    }
+
+    function formatFileSize(bytes) {
+      if (!bytes) return '';
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str || '';
+      return div.innerHTML;
+    }
+
+    // ============================================================
+    // 初始化
+    // ============================================================
+    document.addEventListener('DOMContentLoaded', () => {
+      loadCategories();
+    });
+
+    // ============================================================
+    // 分类 API
+    // ============================================================
+    async function loadCategories() {
+      try {
+        categories = await apiFetch('/categories');
+        tree = buildTree(categories);
+        renderTree();
+        if (selectedId) {
+          // 检查选中的分类是否还存在
+          const stillExists = categories.some(c => c.id === selectedId);
+          if (!stillExists) {
+            selectedId = null;
+            showPlaceholder();
+          } else {
+            renderBreadcrumb();
+          }
+        }
+      } catch (e) {
+        console.error('加载分类失败', e);
+        document.getElementById('categoryTree').innerHTML =
+          '<p class="text-red-400 text-xs text-center py-8">加载失败: ' + escapeHtml(e.message) + '</p>';
+      }
+    }
+
+    async function handleCreate(name, parentId) {
+      try {
+        await apiFetch('/categories', {
+          method: 'POST',
+          body: JSON.stringify({ name, parent_id: parentId || null }),
+        });
+        await loadCategories();
+        closeModal();
+      } catch (e) {
+        alert('创建失败: ' + e.message);
+      }
+    }
+
+    async function handleRename(id, name) {
+      try {
+        await apiFetch('/categories/' + id, {
+          method: 'PUT',
+          body: JSON.stringify({ name }),
+        });
+        await loadCategories();
+        closeModal();
+      } catch (e) {
+        alert('重命名失败: ' + e.message);
+      }
+    }
+
+    async function handleDelete(id) {
+      try {
+        await apiFetch('/categories/' + id, { method: 'DELETE' });
+        if (selectedId === id) {
+          selectedId = null;
+          showPlaceholder();
+        }
+        await loadCategories();
+        closeDeleteModal();
+      } catch (e) {
+        alert('删除失败: ' + e.message);
+      }
+    }
+
+    // ============================================================
+    // 渲染分类树
+    // ============================================================
+    function renderTreeNode(node, depth) {
+      depth = depth || 0;
+      const hasChildren = node.children && node.children.length > 0;
+      const isExpanded = expandedIds.has(node.id);
+      const isSelected = selectedId === node.id;
+
+      const div = document.createElement('div');
+      const item = document.createElement('div');
+      item.className = 'flex items-center px-3 py-2 cursor-pointer hover:bg-slate-700 transition-colors group' +
+        (isSelected ? ' bg-blue-600 text-white' : ' text-slate-200');
+      item.style.paddingLeft = (12 + depth * 16) + 'px';
+
+      // 展开/折叠图标
+      const expandIcon = document.createElement('span');
+      expandIcon.className = 'w-4 text-center mr-1 text-xs';
+      expandIcon.textContent = hasChildren ? (isExpanded ? '▼' : '▶') : '';
+
+      // 文件夹图标
+      const folderIcon = document.createElement('i');
+      folderIcon.className = 'fas fa-folder mr-2 text-sm' + (isSelected ? ' text-white' : ' text-slate-400');
+
+      // 名称
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'flex-1 truncate text-sm';
+      nameSpan.textContent = node.name;
+
+      // 操作按钮
+      const actions = document.createElement('div');
+      actions.className = 'hidden group-hover:flex items-center gap-1 ml-1';
+
+      const addBtn = document.createElement('button');
+      addBtn.title = '新建子分类';
+      addBtn.className = 'text-slate-400 hover:text-white text-xs px-1';
+      addBtn.innerHTML = '<i class="fas fa-plus"></i>';
+      addBtn.onclick = (e) => { e.stopPropagation(); openCreateModal(node.id); };
+
+      const renameBtn = document.createElement('button');
+      renameBtn.title = '重命名';
+      renameBtn.className = 'text-slate-400 hover:text-white text-xs px-1';
+      renameBtn.innerHTML = '<i class="fas fa-pen"></i>';
+      renameBtn.onclick = (e) => { e.stopPropagation(); openRenameModal(node.id, node.name); };
+
+      const delBtn = document.createElement('button');
+      delBtn.title = '删除';
+      delBtn.className = 'text-slate-400 hover:text-red-400 text-xs px-1';
+      delBtn.innerHTML = '<i class="fas fa-trash"></i>';
+      delBtn.onclick = (e) => { e.stopPropagation(); openDeleteModal(node.id, node.name); };
+
+      actions.appendChild(addBtn);
+      actions.appendChild(renameBtn);
+      actions.appendChild(delBtn);
+
+      item.appendChild(expandIcon);
+      item.appendChild(folderIcon);
+      item.appendChild(nameSpan);
+      item.appendChild(actions);
+
+      // 点击事件
+      item.onclick = () => {
+        selectedId = node.id;
+        messages = [];
+        renderTree();
+        renderBreadcrumb();
+        showDetail();
+        loadDocuments(node.id);
+        if (hasChildren) {
+          toggleExpand(node.id);
+        }
+      };
+
+      div.appendChild(item);
+
+      // 子节点
+      if (hasChildren && isExpanded) {
+        const childrenContainer = document.createElement('div');
+        node.children.forEach(child => {
+          childrenContainer.appendChild(renderTreeNode(child, depth + 1));
+        });
+        div.appendChild(childrenContainer);
+      }
+
+      return div;
+    }
+
+    function renderTree() {
+      const container = document.getElementById('categoryTree');
+      container.innerHTML = '';
+      if (tree.length === 0) {
+        container.innerHTML = '<p class="text-slate-500 text-xs text-center py-8">暂无学科，点击上方按钮创建</p>';
+        return;
+      }
+      tree.forEach(node => {
+        container.appendChild(renderTreeNode(node, 0));
+      });
+    }
+
+    function toggleExpand(id) {
+      if (expandedIds.has(id)) {
+        expandedIds.delete(id);
+      } else {
+        expandedIds.add(id);
+      }
+      renderTree();
+    }
+
+    // ============================================================
+    // 面包屑
+    // ============================================================
+    function renderBreadcrumb() {
+      const container = document.getElementById('breadcrumb');
+      if (!selectedId) {
+        container.innerHTML = '<p class="text-sm text-slate-400"><i class="fas fa-arrow-left mr-2"></i>请从左侧选择一个学科</p>';
+        return;
+      }
+      const path = findPath(tree, selectedId);
+      if (!path || path.length === 0) {
+        container.innerHTML = '<p class="text-sm text-slate-400"><i class="fas fa-arrow-left mr-2"></i>请从左侧选择一个学科</p>';
+        return;
+      }
+      let html = '<nav class="flex items-center text-sm text-slate-500"><i class="fas fa-home text-slate-400 mr-2"></i>';
+      path.forEach((node, idx) => {
+        if (idx > 0) html += '<span class="mx-2 text-slate-300">/</span>';
+        const isLast = idx === path.length - 1;
+        html += '<button class="hover:text-blue-600' + (isLast ? ' text-blue-600 font-medium' : '') +
+          '" onclick="navigateTo(' + node.id + ')">' + escapeHtml(node.name) + '</button>';
+      });
+      html += '</nav>';
+      container.innerHTML = html;
+    }
+
+    function navigateTo(id) {
+      selectedId = id;
+      messages = [];
+      renderTree();
+      renderBreadcrumb();
+      showDetail();
+      loadDocuments(id);
+    }
+
+    // ============================================================
+    // 文件操作
+    // ============================================================
+    async function loadDocuments(catId) {
+      try {
+        documents = await apiFetch('/categories/' + catId + '/documents');
+        renderDocuments();
+      } catch (e) {
+        console.error('加载文件失败', e);
+        documents = [];
+        renderDocuments();
+      }
+    }
+
+    function renderDocuments() {
+      document.getElementById('fileCount').textContent = '(' + documents.length + ' 个文件)';
+      const container = document.getElementById('fileList');
+
+      if (documents.length === 0) {
+        container.innerHTML =
+          '<div class="p-8 text-center text-slate-400">' +
+          '<i class="fas fa-file-upload text-3xl mb-2"></i>' +
+          '<p class="text-sm">暂无资料，点击上方按钮上传</p></div>';
+        return;
+      }
+
+      let html = '<div class="divide-y divide-slate-100">';
+      documents.forEach(doc => {
+        const filename = doc.filename || doc.name || '未命名文件';
+        const size = formatFileSize(doc.size);
+        const time = doc.created_at ? ' · ' + new Date(doc.created_at).toLocaleString('zh-CN') : '';
+        html +=
+          '<div class="flex items-center px-4 py-3 hover:bg-slate-50 group">' +
+          '<i class="fas fa-file text-blue-400 mr-3"></i>' +
+          '<div class="flex-1 min-w-0">' +
+          '<p class="text-sm text-slate-700 truncate">' + escapeHtml(filename) + '</p>' +
+          '<p class="text-xs text-slate-400">' + escapeHtml(size) + escapeHtml(time) + '</p>' +
+          '</div>' +
+          '<button class="text-slate-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity" onclick="deleteDocument(' + doc.id + ')" title="删除文件">' +
+          '<i class="fas fa-trash-alt"></i></button>' +
+          '</div>';
+      });
+      html += '</div>';
+      container.innerHTML = html;
+    }
+
+    async function handleUpload(event) {
+      const file = event.target.files[0];
+      if (!file || !selectedId) return;
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('category_id', String(selectedId));
+      try {
+        await fetch(API_BASE + '/upload', { method: 'POST', body: formData });
+        await loadDocuments(selectedId);
+        alert('上传成功');
+      } catch (e) {
+        alert('上传失败: ' + e.message);
+      }
+      event.target.value = '';
+    }
+
+    async function deleteDocument(docId) {
+      if (!confirm('确定删除此文件吗？')) return;
+      try {
+        // Try DELETE on documents endpoint first, fall back to the move endpoint
+        await fetch(API_BASE + '/documents/' + docId, { method: 'DELETE' });
+        await loadDocuments(selectedId);
+      } catch (e) {
+        try {
+          await apiFetch('/documents/' + docId + '/move', { method: 'DELETE' });
+          await loadDocuments(selectedId);
+        } catch (e2) {
+          alert('删除文件失败: ' + e.message);
+        }
+      }
+    }
+
+    // ============================================================
+    // 聊天
+    // ============================================================
+    async function handleChat() {
+      const input = document.getElementById('chatInput');
+      const text = input.value.trim();
+      if (!text || !selectedId || loading) return;
+
+      messages.push({ role: 'user', content: text });
+      input.value = '';
+      renderMessages();
+      loading = true;
+      document.getElementById('chatBtn').disabled = true;
+
+      try {
+        const data = await apiFetch('/chat', {
+          method: 'POST',
+          body: JSON.stringify({ message: text, category_id: selectedId }),
+        });
+        const reply = data.reply || data.content || data.message || JSON.stringify(data);
+        messages.push({ role: 'assistant', content: reply });
+      } catch (e) {
+        messages.push({ role: 'assistant', content: '请求失败: ' + e.message });
+      }
+      loading = false;
+      document.getElementById('chatBtn').disabled = false;
+      renderMessages();
+    }
+
+    function handleChatKey(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleChat();
+      }
+    }
+
+    function renderMessages() {
+      const container = document.getElementById('chatMessages');
+      if (messages.length === 0) {
+        container.innerHTML =
+          '<div class="flex items-center justify-center h-full text-slate-400">' +
+          '<p class="text-sm">输入问题，AI 将基于当前学科的资料回答</p></div>';
+        return;
+      }
+      let html = '';
+      messages.forEach(msg => {
+        const isUser = msg.role === 'user';
+        html +=
+          '<div class="flex ' + (isUser ? 'justify-end' : 'justify-start') + '">' +
+          '<div class="max-w-[70%] rounded-lg px-4 py-2 text-sm ' +
+          (isUser ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700') + '">' +
+          escapeHtml(msg.content) + '</div></div>';
+      });
+      if (loading) {
+        html +=
+          '<div class="flex justify-start">' +
+          '<div class="bg-slate-100 rounded-lg px-4 py-2 text-sm text-slate-500 flex items-center gap-2">' +
+          '<i class="fas fa-circle-notch fa-spin"></i>AI 思考中...</div></div>';
+      }
+      container.innerHTML = html;
+      container.scrollTop = container.scrollHeight;
+    }
+
+    // ============================================================
+    // 综合测试
+    // ============================================================
+    let examLoading = false;
+
+    async function generateExam() {
+      if (!selectedId || examLoading) return;
+      examLoading = true;
+      const btn = document.getElementById('examBtn');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 生成中...';
+
+      try {
+        const data = await apiFetch('/exam/generate', {
+          method: 'POST',
+          body: JSON.stringify({ category_id: selectedId }),
+        });
+        renderExam(data);
+      } catch (e) {
+        alert('出卷失败: ' + e.message);
+      }
+      examLoading = false;
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-file-alt"></i> 综合测试';
+    }
+
+    function renderExam(data) {
+      if (!data) return;
+      const area = document.getElementById('examArea');
+      const content = document.getElementById('examContent');
+      const titleEl = document.getElementById('examTitle');
+
+      titleEl.textContent = data.title || '综合测试';
+      const questions = data.questions || data.data || [];
+
+      if (Array.isArray(questions) && questions.length > 0) {
+        let html = '';
+        questions.forEach((q, idx) => {
+          html += '<div class="p-3 bg-slate-50 rounded border border-slate-100">' +
+            '<p class="text-sm font-medium text-slate-700">' + (idx + 1) + '. ' +
+            escapeHtml(q.question || q.title || q.content || '') + '</p>';
+
+          if (q.options && Array.isArray(q.options)) {
+            html += '<div class="mt-1 ml-4 space-y-1">';
+            q.options.forEach((opt, oi) => {
+              html += '<p class="text-xs text-slate-600">' +
+                String.fromCharCode(65 + oi) + '. ' + escapeHtml(opt) + '</p>';
             });
-        }
+            html += '</div>';
+          }
 
-        function select(id, name) {
-            curId = id;
-            document.getElementById('statusText').innerText = "当前位置：" + name;
-            document.getElementById('uploadBox').classList.remove('hidden');
-            refresh();
-        }
+          if (q.answer) {
+            html += '<p class="mt-1 text-xs text-green-600">答案: ' + escapeHtml(q.answer) + '</p>';
+          }
 
-        async function addCategory() {
-            const name = prompt("请输入学科或学期名称：");
-            if(!name) return;
-            // 如果点选了某个一级学科，再点添加，就加成子分类
-            await fetch('/api/categories', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ name, parent_id: curId })
-            });
-            refresh();
-        }
+          html += '</div>';
+        });
+        content.innerHTML = html;
+      } else {
+        content.innerHTML = '<pre class="text-xs text-slate-600 whitespace-pre-wrap">' +
+          escapeHtml(JSON.stringify(data, null, 2)) + '</pre>';
+      }
 
-        async function upload(el) {
-            const fd = new FormData();
-            fd.append('file', el.files[0]);
-            fd.append('category_id', curId);
-            msg('ai', "正在读取资料，请稍等...");
-            await fetch('/api/upload', { method: 'POST', body: fd });
-            msg('ai', "✅ 学习完毕！可以开始提问。");
-        }
+      area.classList.remove('hidden');
+    }
 
-        async function send() {
-            const val = document.getElementById('userInput').value;
-            if(!val || !curId) return alert("请先选择左侧的一个具体学科！");
-            msg('user', val);
-            document.getElementById('userInput').value = '';
-            const res = await fetch('/api/chat', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ message: val, category_id: curId })
-            });
-            const data = await res.json();
-            msg('ai', data.answer);
-        }
+    function closeExam() {
+      document.getElementById('examArea').classList.add('hidden');
+    }
 
-        function msg(role, text) {
-            const div = document.createElement('div');
-            div.className = `p-4 rounded-2xl max-w-[80%] ${role === 'user' ? 'bg-blue-600 text-white ml-auto' : 'bg-slate-100 text-slate-800'}`;
-            div.innerText = text;
-            document.getElementById('chatArea').appendChild(div);
-            document.getElementById('chatArea').scrollTop = 100000;
-        }
+    // ============================================================
+    // 显示 / 隐藏
+    // ============================================================
+    function showPlaceholder() {
+      document.getElementById('placeholder').classList.remove('hidden');
+      document.getElementById('detailArea').classList.add('hidden');
+      renderBreadcrumb();
+    }
 
-        refresh();
-    </script>
+    function showDetail() {
+      document.getElementById('placeholder').classList.add('hidden');
+      document.getElementById('detailArea').classList.remove('hidden');
+
+      // 判断是否一级学科以显示综合测试按钮
+      const isTop = isTopLevel(tree, selectedId);
+      document.getElementById('examSection').style.display = isTop ? 'flex' : 'none';
+      closeExam();
+      renderMessages();
+    }
+
+    // ============================================================
+    // 模态框
+    // ============================================================
+    function openCreateModal(parentId) {
+      modalType = 'create';
+      modalParentId = parentId;
+      modalNodeId = null;
+      document.getElementById('modalTitle').textContent = parentId ? '新建子分类' : '新建一级学科';
+      document.getElementById('modalInput').value = '';
+      document.getElementById('modalInput').placeholder = '输入名称';
+      document.getElementById('modalOverlay').classList.remove('hidden');
+      setTimeout(() => document.getElementById('modalInput').focus(), 100);
+    }
+
+    function openRenameModal(id, name) {
+      modalType = 'rename';
+      modalParentId = null;
+      modalNodeId = id;
+      modalNodeName = name;
+      document.getElementById('modalTitle').textContent = '重命名';
+      document.getElementById('modalInput').value = name;
+      document.getElementById('modalInput').placeholder = '输入新名称';
+      document.getElementById('modalOverlay').classList.remove('hidden');
+      setTimeout(() => {
+        const input = document.getElementById('modalInput');
+        input.focus();
+        input.select();
+      }, 100);
+    }
+
+    function openDeleteModal(id, name) {
+      modalNodeId = id;
+      modalNodeName = name;
+      document.getElementById('deleteModalText').textContent = '确定删除「' + name + '」及其所有子分类吗？';
+      document.getElementById('deleteConfirmBtn').onclick = () => handleDelete(id);
+      document.getElementById('deleteModalOverlay').classList.remove('hidden');
+    }
+
+    function closeModal() {
+      document.getElementById('modalOverlay').classList.add('hidden');
+      modalType = null;
+      modalParentId = null;
+      modalNodeId = null;
+    }
+
+    function closeDeleteModal() {
+      document.getElementById('deleteModalOverlay').classList.add('hidden');
+      modalNodeId = null;
+    }
+
+    function confirmModal() {
+      const input = document.getElementById('modalInput');
+      const val = input.value.trim();
+      if (!val) return;
+      if (modalType === 'create') {
+        handleCreate(val, modalParentId);
+      } else if (modalType === 'rename') {
+        handleRename(modalNodeId, val);
+      }
+    }
+  </script>
+
 </body>
 </html>
