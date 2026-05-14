@@ -1,76 +1,68 @@
 -- ============================================================
--- AI 学科助手 - Supabase 数据库升级脚本
--- 需要在 Supabase SQL Editor 中执行
+-- AI 学科助手 - Supabase 数据库初始化
 -- ============================================================
 
--- 1. 启用 pgvector 扩展
-create extension if not exists vector;
+-- 1. 节点表（分层知识库树形结构）
+CREATE TABLE IF NOT EXISTS nodes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  node_type TEXT NOT NULL CHECK (node_type IN ('category', 'subcategory', 'course')),
+  parent_id UUID REFERENCES nodes(id) ON DELETE CASCADE,
+  description TEXT DEFAULT '',
+  sort_order INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
 
--- 2. 为 documents 表添加 embedding 列（如果还没有）
-alter table documents add column if not exists embedding vector(1536);
+CREATE INDEX IF NOT EXISTS idx_nodes_parent_id ON nodes(parent_id);
 
--- 3. 创建向量索引（IVFFlat，余弦相似度）
---    lists = 100 适合中小规模数据（<100万行）
-create index if not exists documents_embedding_idx
-  on documents
-  using ivfflat (embedding vector_cosine_ops)
-  with (lists = 100);
+-- 2. 文档/知识块表
+CREATE TABLE IF NOT EXISTS documents (
+  id TEXT PRIMARY KEY,
+  node_id UUID REFERENCES nodes(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,
+  embedding VECTOR(1536),        -- DeepSeek embedding vector
+  filename TEXT NOT NULL,
+  chunk_index INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
 
--- 4. 创建向量匹配函数（用于 RPC 调用）
-create or replace function match_documents(
-  query_embedding vector(1536),
-  match_threshold float default 0.5,
-  match_count int default 10,
-  filter_category_ids text[] default null
+CREATE INDEX IF NOT EXISTS idx_documents_node_id ON documents(node_id);
+CREATE INDEX IF NOT EXISTS idx_documents_filename ON documents(filename);
+
+-- 3. 向量搜索支持（文本搜索 + 向量搜索混合）
+-- 先启用 pgvector
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- 知识匹配查询函数
+CREATE OR REPLACE FUNCTION match_documents(
+  query_embedding VECTOR(1536),
+  match_count INT DEFAULT 5,
+  filter_node_id UUID DEFAULT NULL
 )
-returns table (
-  id bigint,
-  category_id text,
-  filename text,
-  content text,
-  similarity float
+RETURNS TABLE(
+  id TEXT,
+  content TEXT,
+  filename TEXT,
+  similarity FLOAT
 )
-language plpgsql
-as $$
-begin
-  return query
-  select
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
     documents.id,
-    documents.category_id,
-    documents.filename,
     documents.content,
-    1 - (documents.embedding <=> query_embedding) as similarity
-  from documents
-  where
-    documents.embedding is not null
-    and (filter_category_ids is null or documents.category_id = any(filter_category_ids))
-    and (1 - (documents.embedding <=> query_embedding)) > match_threshold
-  order by documents.embedding <=> query_embedding
-  limit match_count;
-end;
+    documents.filename,
+    1 - (documents.embedding <=> query_embedding) AS similarity
+  FROM documents
+  WHERE
+    (filter_node_id IS NULL OR documents.node_id = filter_node_id)
+    AND documents.embedding IS NOT NULL
+  ORDER BY documents.embedding <=> query_embedding
+  LIMIT match_count;
+END;
 $$;
 
--- 5. 递归获取所有子分类函数（如果你还没有）
-create or replace function get_all_sub_categories(root_id text)
-returns table (id text, name text, parent_id text, level int)
-language plpgsql
-as $$
-begin
-  return query
-  with recursive sub_cats as (
-    -- 根节点
-    select c.id, c.name, c.parent_id, 0 as level
-    from categories c
-    where c.id = root_id
-    union all
-    -- 递归子节点
-    select c.id, c.name, c.parent_id, sc.level + 1
-    from categories c
-    inner join sub_cats sc on c.parent_id = sc.id
-  )
-  select * from sub_cats;
-end;
-$$;
-
--- 可选：查看当前文档表中有没有 embedding
--- select count(*) as total_docs, count(embedding) as with_embedding from documents;
+-- 4. 添加示例数据（可选）
+-- INSERT INTO nodes (name, node_type) VALUES ('人工智能', 'category');

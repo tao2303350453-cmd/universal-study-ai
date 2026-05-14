@@ -1,547 +1,430 @@
 """
-AI 学科助手后端 - 升级版
-支持向量检索、学科管理、综合出卷
+AI 学科助手 - 知识库分层管理系统
 
-环境变量:
-  SUPABASE_URL       - Supabase project URL
-  SUPABASE_KEY       - Supabase anon/public key (需具备 documents, categories 表的读写权限)
-  DEEPSEEK_API_KEY   - DeepSeek API key
+核心功能:
+1. 分层学科管理：学科 → 子分类 → 课程（树形结构）
+2. PDF/文本导入：自动切片存入数据库
+3. 智能问答：基于 DeepSeek 递归检索子层级知识库
 """
+
 import os
 import io
+import json
+import hashlib
 import logging
-import traceback
-from typing import Optional
+from typing import Optional, List
+from datetime import datetime
 
-from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from supabase import create_client, Client
-from openai import OpenAI
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from fastapi.responses import JSONResponse
 import pypdf
+from openai import OpenAI
 
-# ---------------------------------------------------------------------------
-# 日志
-# ---------------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("study-ai")
+logging.basicConfig(level=logging.INFO)
 
-# ---------------------------------------------------------------------------
-# FastAPI 应用
-# ---------------------------------------------------------------------------
-app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(title="AI 学科助手", version="2.0")
 
-# ---------------------------------------------------------------------------
-# 客户端初始化
-# ---------------------------------------------------------------------------
-supabase: Client = create_client(
-    os.environ.get("SUPABASE_URL", ""),
-    os.environ.get("SUPABASE_KEY", ""),
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-ai_client = OpenAI(
-    api_key=os.environ.get("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com",
-)
+# ── Supabase via REST (no supabase-py dependency) ──
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 
-# ---------------------------------------------------------------------------
-# 常量 & 配置
-# ---------------------------------------------------------------------------
-EMBEDDING_MODEL = "text-embedding-v2"          # DeepSeek embedding 模型
-EMBEDDING_DIM = 1536                           # 向量维度
-CHUNK_SIZE = 800
-CHUNK_OVERLAP = 150
-MAX_CONTEXT_LENGTH = 6000                      # 送到 LLM 的最大上下文长度
-MAX_EXAM_CONTEXT = 15000                       # 出卷时最大上下文
+supabase_headers = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation",
+}
 
-# ---------------------------------------------------------------------------
-# Embedding 工具
-# ---------------------------------------------------------------------------
+def sb_get(path: str, params: dict = None):
+    """Supabase REST GET"""
+    url = f"{SUPABASE_URL}/rest/v1/{path}"
+    if params:
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        url += f"?{qs}"
+    r = requests.get(url, headers=supabase_headers)
+    return r.json() if r.status_code < 300 else {"error": r.text, "status": r.status_code}
 
-def get_embedding(text: str) -> Optional[list[float]]:
-    """
-    使用 DeepSeek text-embedding-v2 生成向量。
-    失败时返回 None，上层自动降级为纯文本检索。
-    """
+def sb_post(path: str, body: dict):
+    url = f"{SUPABASE_URL}/rest/v1/{path}"
+    r = requests.post(url, headers=supabase_headers, json=body)
+    return r.json() if r.status_code < 300 else {"error": r.text, "status": r.status_code}
+
+def sb_delete(path: str, query: str):
+    url = f"{SUPABASE_URL}/rest/v1/{path}?{query}"
+    headers = {**supabase_headers, "Prefer": "return=minimal"}
+    r = requests.delete(url, headers=headers)
+    return {"ok": r.status_code < 300, "status": r.status_code}
+
+
+# ═══════════════════════════════════════════════════
+# 节点管理（学科/子分类/课程 树形结构）
+# ═══════════════════════════════════════════════════
+
+@app.get("/api/nodes")
+def get_nodes(parent_id: Optional[str] = Query(None)):
+    """获取节点树 / 子节点列表"""
     try:
-        resp = ai_client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=text,
-        )
-        return resp.data[0].embedding
-    except Exception as exc:
-        logger.warning("DeepSeek embedding 失败，降级为纯文本检索。原因: %s", exc)
-        return None
-
-
-def batch_embeddings(texts: list[str]) -> list[Optional[list[float]]]:
-    """批量获取 embedding，失败项返回 None"""
-    return [get_embedding(t) for t in texts]
-
-
-# ---------------------------------------------------------------------------
-# 数据库辅助函数
-# ---------------------------------------------------------------------------
-
-def get_all_sub_category_ids(root_id: str) -> list[str]:
-    """
-    递归获取所有子分类 ID（包含自身）。
-    优先使用 Supabase RPC get_all_sub_categories，失败后降级为手动递归。
-    """
-    try:
-        rpc_res = supabase.rpc("get_all_sub_categories", {"root_id": root_id}).execute()
-        if rpc_res.data:
-            return [item["id"] for item in rpc_res.data]
-    except Exception:
-        logger.info("RPC get_all_sub_categories 不可用，使用手动递归")
-
-    # 手动递归降级
-    ids = [root_id]
-    queue = [root_id]
-    visited = set()
-    while queue:
-        pid = queue.pop(0)
-        if pid in visited:
-            continue
-        visited.add(pid)
-        try:
-            children = supabase.table("categories").select("id").eq("parent_id", pid).execute()
-            for child in children.data:
-                cid = child["id"]
-                if cid not in visited:
-                    ids.append(cid)
-                    queue.append(cid)
-        except Exception:
-            break
-    return ids
-
-
-def get_documents_by_category_ids(category_ids: list[str], limit: int = 200) -> list[dict]:
-    """根据分类 ID 列表获取文档 chunks，可设置 limit"""
-    if not category_ids:
-        return []
-    query = supabase.table("documents").select("id, category_id, filename, content").in_(
-        "category_id", category_ids
-    ).limit(limit).execute()
-    return query.data
-
-
-def get_documents_text(category_ids: list[str], max_len: int = MAX_CONTEXT_LENGTH) -> str:
-    """拼接文档文本，截断到 max_len"""
-    docs = get_documents_by_category_ids(category_ids, limit=500)
-    return "\n\n".join(d["content"] for d in docs)[:max_len]
-
-
-# ---------------------------------------------------------------------------
-# API - 健康检查
-# ---------------------------------------------------------------------------
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "supabase_connected": supabase is not None}
-
-
-# ---------------------------------------------------------------------------
-# API - 分类管理（原有 + 新增端点）
-# ---------------------------------------------------------------------------
-
-@app.get("/categories")
-async def get_categories():
-    """获取所有分类"""
-    res = supabase.table("categories").select("*").order("name").execute()
-    return res.data
-
-
-@app.post("/categories")
-async def add_category(request: Request):
-    """新增分类"""
-    data = await request.json()
-    name = data.get("name")
-    parent_id = data.get("parent_id")
-    if not name or not name.strip():
-        raise HTTPException(status_code=400, detail="分类名称不能为空")
-    res = supabase.table("categories").insert({
-        "name": name.strip(),
-        "parent_id": parent_id,
-    }).execute()
-    return {"status": "success", "data": res.data}
-
-
-@app.put("/categories/{category_id}")
-async def rename_category(category_id: str, request: Request):
-    """重命名分类"""
-    data = await request.json()
-    new_name = data.get("name")
-    if not new_name or not new_name.strip():
-        raise HTTPException(status_code=400, detail="分类名称不能为空")
-    res = supabase.table("categories").update({"name": new_name.strip()}).eq(
-        "id", category_id
-    ).execute()
-    if not res.data:
-        raise HTTPException(status_code=404, detail="分类未找到")
-    return {"status": "success", "data": res.data}
-
-
-@app.delete("/categories/{category_id}")
-async def delete_category(category_id: str):
-    """
-    删除分类（级联删除子分类和文档）
-    流程：
-      1. 递归获取该分类下所有子分类 ID
-      2. 删除所有子分类下的文档
-      3. 删除所有子分类
-      4. 删除当前分类及其文档
-    """
-    try:
-        all_ids = get_all_sub_category_ids(category_id)
-    except Exception:
-        all_ids = [category_id]
-
-    # 删除文档（所有子分类 + 自身）
-    for cid in all_ids:
-        supabase.table("documents").delete().eq("category_id", cid).execute()
-
-    # 删除子分类（从深层到根部的顺序无法保证，批量删除即可）
-    for cid in all_ids:
-        if cid != category_id:
-            supabase.table("categories").delete().eq("id", cid).execute()
-
-    # 删除自身
-    res = supabase.table("categories").delete().eq("id", category_id).execute()
-    if not res.data:
-        raise HTTPException(status_code=404, detail="分类未找到")
-    return {"status": "success", "deleted": {"category": category_id, "sub_categories": len(all_ids) - 1}}
-
-
-# ---------------------------------------------------------------------------
-# API - 文档管理
-# ---------------------------------------------------------------------------
-
-@app.get("/categories/{category_id}/documents")
-async def list_documents(category_id: str):
-    """
-    列出指定分类下的文档（按文件名去重，返回元信息）
-    """
-    docs = (
-        supabase.table("documents")
-        .select("id, filename, category_id, created_at, content")
-        .eq("category_id", category_id)
-        .order("created_at", desc=True)
-        .execute()
-    )
-    # 按文件名去重取最新的
-    seen = {}
-    for d in docs.data:
-        fn = d["filename"]
-        if fn not in seen:
-            seen[fn] = {
-                "id": d["id"],
-                "filename": d["filename"],
-                "category_id": d["category_id"],
-                "created_at": d.get("created_at", ""),
-                "size": len(d.get("content", "")),
-                "chunks": 1,
-            }
+        import requests
+        if parent_id:
+            data = sb_get("nodes", {"parent_id": f"eq.{parent_id}", "order": "sort_order.asc"})
         else:
-            seen[fn]["chunks"] += 1
-            seen[fn]["size"] += len(d.get("content", ""))
-    return list(seen.values())
+            data = sb_get("nodes", {"parent_id": "is.null", "order": "sort_order.asc"})
+        return {"nodes": data if isinstance(data, list) else []}
+    except Exception as e:
+        return {"error": str(e)}
 
+@app.get("/api/nodes/tree")
+def get_full_tree():
+    """获取完整树结构"""
+    try:
+        import requests
+        all_nodes = sb_get("nodes", {"order": "sort_order.asc"})
+        if not isinstance(all_nodes, list):
+            return {"nodes": []}
+        
+        node_map = {n["id"]: {**n, "children": []} for n in all_nodes}
+        roots = []
+        for n in node_map.values():
+            if n["parent_id"] is None:
+                roots.append(n)
+            elif n["parent_id"] in node_map:
+                node_map[n["parent_id"]]["children"].append(n)
+        
+        return {"nodes": roots}
+    except Exception as e:
+        return {"error": str(e)}
 
-@app.put("/documents/{doc_id}/move")
-async def move_document(doc_id: str, request: Request):
-    """移动文档到其他分类（同一文件名下的所有 chunk 一起移动）"""
-    data = await request.json()
-    new_category_id = data.get("category_id")
-    if not new_category_id:
-        raise HTTPException(status_code=400, detail="缺少 category_id")
-
-    # 获取该文档信息，找到文件名
-    doc = supabase.table("documents").select("filename").eq("id", doc_id).execute()
-    if not doc.data:
-        raise HTTPException(status_code=404, detail="文档未找到")
-    filename = doc.data[0]["filename"]
-
-    # 移动同文件名的所有 chunk
-    res = (
-        supabase.table("documents")
-        .update({"category_id": new_category_id})
-        .eq("filename", filename)
-        .execute()
-    )
-    return {"status": "success", "moved": len(res.data)}
-
-
-# ---------------------------------------------------------------------------
-# API - 上传文档（升级版：生成 embedding）
-# ---------------------------------------------------------------------------
-
-@app.post("/upload")
-async def upload_file(file: UploadFile = File(...), category_id: str = Form(...)):
-    """
-    上传文件（PDF/文本），切分 chunk 并生成向量 embedding。
-    如果 DeepSeek embedding 不可用，只保存文本，不阻塞流程。
-    """
-    file_bytes = await file.read()
-    content = ""
-
-    if file.filename.endswith(".pdf"):
-        try:
-            pdf_reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-            content = " ".join(
-                page.extract_text() for page in pdf_reader.pages if page.extract_text()
-            )
-        except Exception as exc:
-            logger.error("PDF 解析失败: %s", exc)
-            raise HTTPException(status_code=400, detail=f"PDF 解析失败: {exc}")
-    else:
-        content = file_bytes.decode("utf-8", errors="ignore")
-
-    if not content.strip():
-        raise HTTPException(status_code=400, detail="文件内容为空，无法处理")
-
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
-    )
-    chunks = text_splitter.split_text(content)
-
-    if not chunks:
-        raise HTTPException(status_code=400, detail="切分后无有效内容")
-
-    # 批量生成 embedding（允许失败降级）
-    embeddings = batch_embeddings(chunks)
-    has_embeddings = any(e is not None for e in embeddings)
-
-    inserted = 0
-    for i, chunk in enumerate(chunks):
-        record = {
-            "category_id": category_id,
-            "filename": file.filename,
-            "content": chunk,
+@app.post("/api/nodes")
+async def create_node(
+    name: str = Form(...),
+    node_type: str = Form("category"),
+    parent_id: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+):
+    """创建节点（学科/子分类/课程）"""
+    try:
+        import requests
+        import uuid
+        node_id = str(uuid.uuid4())
+        body = {
+            "id": node_id,
+            "name": name,
+            "node_type": node_type,
+            "parent_id": parent_id,
+            "description": description or "",
+            "sort_order": 0,
+            "created_at": datetime.utcnow().isoformat(),
         }
-        if has_embeddings and embeddings[i] is not None:
-            record["embedding"] = embeddings[i]
+        result = sb_post("nodes", body)
+        return {"id": node_id, "node": result}
+    except Exception as e:
+        return {"error": str(e)}
 
-        supabase.table("documents").insert(record).execute()
-        inserted += 1
-
-    return {
-        "status": "success",
-        "chunks": inserted,
-        "has_embedding": has_embeddings,
-        "embedding_model": EMBEDDING_MODEL if has_embeddings else None,
-    }
-
-
-# ---------------------------------------------------------------------------
-# API - 聊天（升级版：向量检索 + 关键词混合检索）
-# ---------------------------------------------------------------------------
-
-@app.post("/chat")
-async def chat(request: Request):
-    """
-    聊天接口：
-    - 可指定 category_id 限定检索范围（含子分类）
-    - 使用向量检索 + 关键词检索（混合检索）
-    - 如果向量不可用，降级为关键词检索
-    """
-    data = await request.json()
-    message = data.get("message", "")
-    cat_id = data.get("category_id")
-    history = data.get("history", [])  # 可选：历史消息列表
-
-    if not message.strip():
-        raise HTTPException(status_code=400, detail="消息不能为空")
-
-    # 1. 确定检索范围
-    if cat_id:
-        try:
-            all_ids = get_all_sub_category_ids(cat_id)
-        except Exception:
-            all_ids = [cat_id]
-    else:
-        # 没有指定分类，检索全部文档（最多取 500 条）
-        docs_all = supabase.table("documents").select("id, content").limit(500).execute()
-        all_ids = None  # 标记为「全部文档」
-
-    # 2. 混合检索
-    #    先尝试向量检索，再补关键词检索
-    retrieved_chunks = []
-
-    # 2a. 向量检索（如果 embedding 可用）
+@app.delete("/api/nodes/{node_id}")
+def delete_node(node_id: str):
+    """删除节点及其所有子节点"""
     try:
-        query_emb = get_embedding(message)
-        if query_emb:
-            rpc_params = {
-                "query_embedding": query_emb,
-                "match_threshold": 0.5,
-                "match_count": 10,
-            }
-            if cat_id and all_ids:
-                rpc_params["filter_category_ids"] = all_ids
+        import requests
+        # Collect all descendant IDs
+        to_delete = [node_id]
+        all_nodes = sb_get("nodes", {"select": "id,parent_id"})
+        if isinstance(all_nodes, list):
+            parent_map = {}
+            for n in all_nodes:
+                pid = n.get("parent_id")
+                if pid:
+                    parent_map.setdefault(pid, []).append(n["id"])
+            queue = [node_id]
+            while queue:
+                pid = queue.pop()
+                children = parent_map.get(pid, [])
+                to_delete.extend(children)
+                queue.extend(children)
+        
+        for nid in to_delete:
+            sb_delete("nodes", f"id=eq.{nid}")
+            sb_delete("documents", f"node_id=eq.{nid}")
+        return {"deleted": len(to_delete)}
+    except Exception as e:
+        return {"error": str(e)}
 
-            vec_res = supabase.rpc("match_documents", rpc_params).execute()
-            if vec_res.data:
-                retrieved_chunks.extend(vec_res.data)
-    except Exception as exc:
-        logger.info("向量检索不可用，跳过: %s", exc)
-
-    # 2b. 关键词检索（兜底 / 补充）
+@app.put("/api/nodes/{node_id}")
+async def update_node(node_id: str, name: str = Form(...), description: Optional[str] = Form(None)):
+    """更新节点"""
     try:
-        if all_ids is not None:
-            kw_query = supabase.table("documents").select("id, content").in_(
-                "category_id", all_ids
-            )
+        import requests
+        url = f"{SUPABASE_URL}/rest/v1/nodes?id=eq.{node_id}"
+        body = {"name": name}
+        if description is not None:
+            body["description"] = description
+        r = requests.patch(url, headers=supabase_headers, json=body)
+        return {"ok": r.status_code < 300}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ═══════════════════════════════════════════════════
+# 文档上传 & 处理
+# ═══════════════════════════════════════════════════
+
+@app.post("/api/documents/upload")
+async def upload_document(
+    node_id: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """上传 PDF/文本，AI 自动切片并存入知识库"""
+    try:
+        import requests
+        content_bytes = await file.read()
+        
+        # Parse PDF or text
+        if file.filename.lower().endswith(".pdf"):
+            pdf_reader = pypdf.PdfReader(io.BytesIO(content_bytes))
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
         else:
-            kw_query = supabase.table("documents").select("id, content")
+            text = content_bytes.decode("utf-8", errors="replace")
+        
+        if not text.strip():
+            return {"error": "Empty content"}
+        
+        # Simple chunking: split into ~500-char chunks with overlap
+        chunk_size = 500
+        overlap = 100
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = min(start + chunk_size, len(text))
+            if end < len(text):
+                # Try to break at sentence boundary
+                segment = text[start:end]
+                last_period = max(segment.rfind("。"), segment.rfind("."), segment.rfind("\n"))
+                if last_period > chunk_size // 2:
+                    end = start + last_period + 1
+            chunks.append(text[start:end].strip())
+            start = end - overlap if end - overlap > start else end
+        
+        # Generate embeddings via DeepSeek and store
+        doc_id = hashlib.md5(content_bytes[:1024]).hexdigest()[:16]
+        stored = 0
+        
+        for i, chunk_text in enumerate(chunks):
+            if not chunk_text:
+                continue
+            
+            # Generate embedding (use DeepSeek text-embedding or simple approach)
+            embedding = await generate_embedding(chunk_text)
+            
+            body = {
+                "id": f"{doc_id}_{i}",
+                "node_id": node_id,
+                "content": chunk_text,
+                "embedding": embedding,
+                "filename": file.filename,
+                "chunk_index": i,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            try:
+                sb_post("documents", body)
+                stored += 1
+            except:
+                pass
+        
+        return {
+            "doc_id": doc_id,
+            "chunks": len(chunks),
+            "stored": stored,
+            "filename": file.filename,
+            "total_chars": len(text),
+        }
+    except Exception as e:
+        logger.error(f"Upload error: {e}", exc_info=True)
+        return {"error": str(e)}
 
-        # 对消息做简单分词，用 textsearch 或 ilike
-        keywords = [w for w in message.split() if len(w) > 1]
-        for kw in keywords:
-            kw_query = kw_query.textsearch("content", kw)
+async def generate_embedding(text: str) -> list:
+    """Generate embedding vector. Uses DeepSeek if key available, else fallback."""
+    if DEEPSEEK_API_KEY:
+        try:
+            client = OpenAI(
+                api_key=DEEPSEEK_API_KEY,
+                base_url="https://api.deepseek.com",
+            )
+            resp = client.embeddings.create(
+                model="text-embedding-v2",  # DeepSeek embedding model
+                input=text[:2048],
+            )
+            return resp.data[0].embedding
+        except Exception as e:
+            logger.warning(f"DeepSeek embedding failed: {e}")
+    
+    # Fallback: return empty embedding (will use text search instead)
+    return []
 
-        kw_res = kw_query.limit(10).execute()
-        if kw_res.data:
-            retrieved_chunks.extend(kw_res.data)
-    except Exception as exc:
-        logger.info("关键词检索降级失败: %s", exc)
 
-    # 2c. 如果什么都没检索到，回退到普通文本检索
-    if not retrieved_chunks:
-        logger.info("向量+关键词检索均空，使用普通文本检索")
-        context = get_documents_text(all_ids if all_ids else [], MAX_CONTEXT_LENGTH)
-    else:
-        # 去重
-        seen_ids = set()
-        unique = []
-        for c in retrieved_chunks:
-            if c["id"] not in seen_ids:
-                seen_ids.add(c["id"])
-                unique.append(c)
-        context = "\n\n".join(c["content"] for c in unique)[:MAX_CONTEXT_LENGTH]
-
-    # 3. 构建消息
-    system_prompt = f"你是一个AI学科助手。请根据以下参考资料回答用户的问题。如果资料不足以回答问题，请如实告知。\n\n参考资料：\n{context}"
-
-    messages = [{"role": "system", "content": system_prompt}]
-
-    # 注入历史（最多保留最近 6 条）
-    if history:
-        for h in history[-6:]:
-            role = h.get("role", "user")
-            msg = h.get("content", "")
-            if role in ("user", "assistant") and msg:
-                messages.append({"role": role, "content": msg})
-
-    messages.append({"role": "user", "content": message})
-
-    # 4. 调用 DeepSeek
+@app.get("/api/documents")
+def list_documents(node_id: Optional[str] = Query(None)):
+    """获取指定节点下的文档列表"""
     try:
-        response = ai_client.chat.completions.create(
+        import requests
+        if node_id:
+            data = sb_get("documents", {"node_id": f"eq.{node_id}", "select": "distinct(filename,node_id,created_at)"})
+            # Deduplicate by filename
+            seen = set()
+            result = []
+            for d in data if isinstance(data, list) else []:
+                fn = d.get("filename", "")
+                if fn not in seen:
+                    seen.add(fn)
+                    result.append(d)
+            return {"documents": result}
+        return {"documents": []}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.delete("/api/documents/{doc_id}")
+def delete_document(doc_id: str):
+    """删除文档"""
+    try:
+        sb_delete("documents", f"filename=eq.{doc_id}")
+        return {"ok": True}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ═══════════════════════════════════════════════════
+# 智能问答
+# ═══════════════════════════════════════════════════
+
+@app.post("/api/chat")
+async def chat(
+    node_id: str = Form(...),
+    question: str = Form(...),
+    include_subnodes: bool = Form(True),
+):
+    """基于知识库的智能问答 - 递归检索子层级"""
+    try:
+        import requests
+        
+        # 1. Collect all relevant content from this node and sub-nodes
+        context_chunks = collect_node_knowledge(node_id, include_subnodes)
+        
+        if not context_chunks:
+            return {
+                "answer": "该节点下还没有资料。请先上传 PDF 或文本文档。",
+                "sources": [],
+            }
+        
+        # 2. Rerank: find most relevant chunks
+        relevant = rerank_chunks(context_chunks, question, top_k=8)
+        
+        # 3. Build context
+        context = "\n\n---\n\n".join(
+            f"[{r['filename']} 第{r['chunk_index']}段]:\n{r['content']}"
+            for r in relevant
+        )
+        
+        # 4. Call DeepSeek
+        answer = await call_deepseek(question, context)
+        
+        return {
+            "answer": answer,
+            "sources": [{"filename": r["filename"], "content": r["content"][:100]} for r in relevant],
+            "context_chunks": len(context_chunks),
+        }
+    except Exception as e:
+        logger.error(f"Chat error: {e}", exc_info=True)
+        return {"error": str(e), "answer": "抱歉，出了点问题，请稍后再试。"}
+
+def collect_node_knowledge(node_id: str, recursive: bool = True) -> list:
+    """递归收集节点及子节点的所有知识库内容"""
+    import requests
+    
+    chunks = []
+    
+    # Get documents for this node
+    docs = sb_get("documents", {"node_id": f"eq.{node_id}", "select": "content,filename,chunk_index"})
+    if isinstance(docs, list):
+        for d in docs:
+            if d.get("content"):
+                chunks.append(d)
+    
+    # Recursively collect from children
+    if recursive:
+        children = sb_get("nodes", {"parent_id": f"eq.{node_id}"})
+        if isinstance(children, list):
+            for child in children:
+                child_chunks = collect_node_knowledge(child["id"], True)
+                chunks.extend(child_chunks)
+    
+    return chunks
+
+def rerank_chunks(chunks: list, question: str, top_k: int = 8) -> list:
+    """Rerank chunks by relevance to question"""
+    scored = []
+    q_words = set(question.lower().split())
+    for c in chunks:
+        content = c.get("content", "")
+        words = set(content.lower().split())
+        # Simple overlap scoring
+        overlap = len(q_words & words)
+        score = overlap / max(len(q_words), 1)
+        scored.append((score, c))
+    
+    scored.sort(key=lambda x: -x[0])
+    return [c for _, c in scored[:top_k]]
+
+async def call_deepseek(question: str, context: str) -> str:
+    """Call DeepSeek API"""
+    if not DEEPSEEK_API_KEY:
+        return "DeepSeek API 未配置。请设置 DEEPSEEK_API_KEY 环境变量。"
+    
+    try:
+        client = OpenAI(
+            api_key=DEEPSEEK_API_KEY,
+            base_url="https://api.deepseek.com",
+        )
+        
+        system_prompt = """你是一个专业的学习助手。请基于提供的资料回答问题。
+要求：
+1. 只使用提供的资料来回答
+2. 如果资料不足以回答问题，请明确说明
+3. 引用具体的资料片段来支撑你的回答
+4. 用中文回答"""
+
+        resp = client.chat.completions.create(
             model="deepseek-chat",
-            messages=messages,
-            temperature=0.7,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"背景资料：\n{context}\n\n问题：{question}"},
+            ],
+            temperature=0.3,
             max_tokens=2048,
         )
-        answer = response.choices[0].message.content
-    except Exception as exc:
-        logger.error("DeepSeek 调用失败: %s", exc)
-        raise HTTPException(status_code=502, detail=f"AI 服务暂时不可用: {exc}")
-
-    return {"answer": answer}
-
-
-# ---------------------------------------------------------------------------
-# API - 综合出卷（新增）
-# ---------------------------------------------------------------------------
-
-@app.post("/exam/generate")
-async def generate_exam(request: Request):
-    """
-    生成综合试卷：
-    - 接收 category_id（一级学科 ID）
-    - 递归获取该学科下所有子分类的文档
-    - 调用 DeepSeek 生成综合试卷
-    """
-    data = await request.json()
-    root_category_id = data.get("category_id")
-    subject_name = data.get("subject_name", "该学科")
-    num_questions = data.get("num_questions", 10)
-
-    if not root_category_id:
-        raise HTTPException(status_code=400, detail="缺少 category_id")
-
-    # 1. 递归获取所有子分类 ID
-    try:
-        all_ids = get_all_sub_category_ids(root_category_id)
-    except Exception as exc:
-        logger.error("获取子分类失败: %s", exc)
-        raise HTTPException(status_code=500, detail=f"获取子分类失败: {exc}")
-
-    if not all_ids:
-        raise HTTPException(status_code=404, detail="该分类下没有子分类或文档")
-
-    # 2. 获取所有文档文本
-    context = get_documents_text(all_ids, MAX_EXAM_CONTEXT)
-    if not context.strip():
-        raise HTTPException(status_code=404, detail="该分类下没有文档内容，无法出卷")
-
-    # 3. 构建出卷 prompt
-    prompt = f"""你是一位专业的{subject_name}教师。请根据以下学习资料，生成一份综合试卷。
-
-要求：
-- 试卷包含 {num_questions} 道题目
-- 题型应多样化（选择题、填空题、简答题、论述题等）
-- 题目难度适中，覆盖资料中的核心知识点
-- 每道题需附上参考答案和简要解析
-- 请用中文输出
-
-学习资料：
-{context}
-
-请按以下格式输出试卷（Markdown格式）：
----
-# {subject_name} 综合试卷
-
-## 一、选择题（每题X分）
-...
-
-## 二、填空题（每题X分）
-...
-
-## 三、简答题（每题X分）
-...
-
-## 参考答案与解析
-...
-"""
-
-    # 4. 调用 DeepSeek
-    try:
-        response = ai_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.8,
-            max_tokens=4096,
-        )
-        exam_content = response.choices[0].message.content
-    except Exception as exc:
-        logger.error("出卷调用失败: %s", exc)
-        raise HTTPException(status_code=502, detail=f"出卷服务暂时不可用: {exc}")
-
-    return {
-        "exam": exam_content,
-        "subject": subject_name,
-        "category_id": root_category_id,
-        "num_questions": num_questions,
-        "source_chunks": len(context),
-    }
+        
+        return resp.choices[0].message.content
+    except Exception as e:
+        logger.error(f"DeepSeek call failed: {e}")
+        return f"AI 回答服务暂时不可用：{str(e)}"
 
 
-# ---------------------------------------------------------------------------
-# 可选：本地运行入口
-# ---------------------------------------------------------------------------
+# ── Health ──
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "version": "2.0.0"}
+
+
 # Vercel ASGI handler
 handler = app
 

@@ -1,14 +1,23 @@
 {
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python",
+      "config": { "maxLambdaSize": "15mb" }
+    },
+    {
+      "src": "frontend/**",
+      "use": "@vercel/static"
+    }
+  ],
   "rewrites": [
     {
       "source": "/api/(.*)",
       "destination": "/api/index.py"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/frontend/index.html"
     }
-  ],
-  "functions": {
-    "api/index.py": {
-      "memory": 300,
-      "maxDuration": 30
-    }
-  }
+  ]
 }
