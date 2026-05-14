@@ -542,6 +542,10 @@ async def generate_exam(request: Request):
 # ---------------------------------------------------------------------------
 # 可选：本地运行入口
 # ---------------------------------------------------------------------------
+# Vercel ASGI handler
+handler = app
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("index:app", host="0.0.0.0", port=8000, reload=True)
